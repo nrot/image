@@ -7,6 +7,13 @@ mod reader;
 
 pub use self::reader::Reader;
 
+#[cfg(feature = "async")]
+mod async_reader;
+
+#[cfg(feature = "async")]
+pub use self::async_reader::AsyncReader;
+
+
 /// Set of supported strict limits for a decoder.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 #[allow(missing_copy_implementations)]
