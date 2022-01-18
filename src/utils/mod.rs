@@ -3,6 +3,17 @@
 use num_iter::range_step;
 use std::iter::repeat;
 
+#[cfg(feature = "async")]
+pub enum ReaderUnion{
+    Reader(std::io::Read),
+    AsyncRead(tokio::io::AsyncRead),
+}
+
+#[cfg(not(feature = "async"))]
+pub enum ReaderUnion<R: std::io::Read> {
+    Reader(std::io::Read),
+}
+
 #[inline(always)]
 pub(crate) fn expand_packed<F>(buf: &mut [u8], channels: usize, bit_depth: u8, mut func: F)
 where

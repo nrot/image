@@ -84,6 +84,50 @@ pub(crate) fn load_decoder<R: BufRead + Seek, V: DecoderVisitor>(
     }
 }
 
+#[cfg(feature = "async")]
+pub(crate) async fn load_decoder_async<R: tokio::io::AsyncBufRead + tokio::io::AsyncSeek, V: DecoderVisitor>(
+    r: R,
+    format: ImageFormat,
+    visitor: V,
+) -> ImageResult<V::Result> {
+    #[allow(unreachable_patterns)]
+    // Default is unreachable if all features are supported.
+    match format {
+        #[cfg(feature = "avif-decoder")]
+        image::ImageFormat::Avif => visitor.visit_decoder(avif::AvifDecoder::new(r)?),
+        #[cfg(feature = "png")]
+        image::ImageFormat::Png => visitor.visit_decoder(png::PngDecoder::new(r)?),
+        #[cfg(feature = "gif")]
+        image::ImageFormat::Gif => visitor.visit_decoder(gif::GifDecoder::new(r)?),
+        #[cfg(feature = "jpeg")]
+        image::ImageFormat::Jpeg => visitor.visit_decoder(jpeg::JpegDecoder::new(r)?),
+        #[cfg(feature = "webp")]
+        image::ImageFormat::WebP => visitor.visit_decoder(webp::WebPDecoder::new(r)?),
+        #[cfg(feature = "tiff")]
+        image::ImageFormat::Tiff => visitor.visit_decoder(tiff::TiffDecoder::new(r)?),
+        #[cfg(feature = "tga")]
+        image::ImageFormat::Tga => visitor.visit_decoder(tga::TgaDecoder::new(r)?),
+        #[cfg(feature = "dds")]
+        image::ImageFormat::Dds => visitor.visit_decoder(dds::DdsDecoder::new(r)?),
+        #[cfg(feature = "bmp")]
+        image::ImageFormat::Bmp => visitor.visit_decoder(bmp::BmpDecoder::new(r)?),
+        #[cfg(feature = "ico")]
+        image::ImageFormat::Ico => visitor.visit_decoder(ico::IcoDecoder::new(r)?),
+        #[cfg(feature = "hdr")]
+        image::ImageFormat::Hdr => visitor.visit_decoder(hdr::HdrAdapter::new(BufReader::new(r))?),
+        #[cfg(feature = "openexr")]
+        image::ImageFormat::OpenExr => visitor.visit_decoder(openexr::OpenExrDecoder::new(r)?),
+        #[cfg(feature = "pnm")]
+        image::ImageFormat::Pnm => visitor.visit_decoder(pnm::PnmDecoder::new(r)?),
+        #[cfg(feature = "farbfeld")]
+        image::ImageFormat::Farbfeld => visitor.visit_decoder(farbfeld::FarbfeldDecoder::new(r)?),
+        _ => Err(ImageError::Unsupported(
+            ImageFormatHint::Exact(format).into(),
+        )),
+    }
+}
+
+
 pub(crate) fn load_inner<R: BufRead + Seek>(
     r: R,
     limits: super::Limits,
@@ -133,6 +177,26 @@ pub(crate) fn image_dimensions_with_format_impl<R: BufRead + Seek>(
 
     load_decoder(buffered_read, format, DimVisitor)
 }
+
+#[cfg(feature = "async")]
+#[allow(unused_variables)]
+// fin is unused if no features are supported.
+pub(crate) async fn image_dimensions_with_format_impl_async<R: tokio::io::AsyncBufRead + tokio::io::AsyncSeek>(
+    buffered_read: R,
+    format: ImageFormat,
+) -> ImageResult<(u32, u32)> {
+    struct DimVisitor;
+
+    impl DecoderVisitor for DimVisitor {
+        type Result = (u32, u32);
+        fn visit_decoder<'a, D: ImageDecoder<'a>>(self, decoder: D) -> ImageResult<Self::Result> {
+            Ok(decoder.dimensions())
+        }
+    }
+
+    load_decoder(buffered_read, format, DimVisitor)
+}
+
 
 #[allow(unused_variables)]
 // Most variables when no features are supported

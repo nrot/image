@@ -20,6 +20,7 @@ use crate::error::{
 };
 use crate::image::{AnimationDecoder, ImageDecoder, ImageEncoder, ImageFormat};
 use crate::{DynamicImage, GenericImage, ImageBuffer, Luma, LumaA, Rgb, Rgba, RgbaImage};
+use crate::utils::ReaderUnion;
 
 // http://www.w3.org/TR/PNG-Structure.html
 // The first eight bytes of a PNG file always contain the following (decimal) values:
@@ -30,14 +31,14 @@ pub(crate) const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 /// This reader will try to read the png one row at a time,
 /// however for interlaced png files this is not possible and
 /// these are therefore read at once.
-pub struct PngReader<R: Read> {
-    reader: png::Reader<R>,
+pub struct PngReader {
+    reader: png::Reader<ReaderUnion>,
     buffer: Vec<u8>,
     index: usize,
 }
 
-impl<R: Read> PngReader<R> {
-    fn new(mut reader: png::Reader<R>) -> ImageResult<PngReader<R>> {
+impl<R: Read> PngReader {
+    fn new(mut reader: png::Reader<R>) -> ImageResult<PngReader> {
         let len = reader.output_buffer_size();
         // Since interlaced images do not come in
         // scanline order it is almost impossible to
@@ -62,7 +63,7 @@ impl<R: Read> PngReader<R> {
     }
 }
 
-impl<R: Read> Read for PngReader<R> {
+impl<R: Read> Read for PngReader {
     fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
         // io::Write::write for slice cannot fail
         let readed = buf.write(&self.buffer[self.index..]).unwrap();
@@ -208,6 +209,103 @@ impl<R: Read> PngDecoder<R> {
     }
 }
 
+#[cfg(feature = "async")]
+impl<R: tokio::io::AsyncRead> PngDecoder<R> {
+    /// Creates a new decoder that decodes from the stream ```r```
+    pub async fn new(r: R) -> ImageResult<PngDecoder<R>> {
+        let limits = png::Limits {
+            bytes: usize::max_value(),
+        };
+        let mut decoder = png::Decoder::new_with_limits(r, limits);
+        // By default the PNG decoder will scale 16 bpc to 8 bpc, so custom
+        // transformations must be set. EXPAND preserves the default behavior
+        // expanding bpc < 8 to 8 bpc.
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let reader = decoder.read_info().map_err(ImageError::from_png)?;
+        let (color_type, bits) = reader.output_color_type();
+        let color_type = match (color_type, bits) {
+            (png::ColorType::Grayscale, png::BitDepth::Eight) => ColorType::L8,
+            (png::ColorType::Grayscale, png::BitDepth::Sixteen) => ColorType::L16,
+            (png::ColorType::GrayscaleAlpha, png::BitDepth::Eight) => ColorType::La8,
+            (png::ColorType::GrayscaleAlpha, png::BitDepth::Sixteen) => ColorType::La16,
+            (png::ColorType::Rgb, png::BitDepth::Eight) => ColorType::Rgb8,
+            (png::ColorType::Rgb, png::BitDepth::Sixteen) => ColorType::Rgb16,
+            (png::ColorType::Rgba, png::BitDepth::Eight) => ColorType::Rgba8,
+            (png::ColorType::Rgba, png::BitDepth::Sixteen) => ColorType::Rgba16,
+
+            (png::ColorType::Grayscale, png::BitDepth::One) => {
+                return Err(unsupported_color(ExtendedColorType::L1))
+            }
+            (png::ColorType::GrayscaleAlpha, png::BitDepth::One) => {
+                return Err(unsupported_color(ExtendedColorType::La1))
+            }
+            (png::ColorType::Rgb, png::BitDepth::One) => {
+                return Err(unsupported_color(ExtendedColorType::Rgb1))
+            }
+            (png::ColorType::Rgba, png::BitDepth::One) => {
+                return Err(unsupported_color(ExtendedColorType::Rgba1))
+            }
+
+            (png::ColorType::Grayscale, png::BitDepth::Two) => {
+                return Err(unsupported_color(ExtendedColorType::L2))
+            }
+            (png::ColorType::GrayscaleAlpha, png::BitDepth::Two) => {
+                return Err(unsupported_color(ExtendedColorType::La2))
+            }
+            (png::ColorType::Rgb, png::BitDepth::Two) => {
+                return Err(unsupported_color(ExtendedColorType::Rgb2))
+            }
+            (png::ColorType::Rgba, png::BitDepth::Two) => {
+                return Err(unsupported_color(ExtendedColorType::Rgba2))
+            }
+
+            (png::ColorType::Grayscale, png::BitDepth::Four) => {
+                return Err(unsupported_color(ExtendedColorType::L4))
+            }
+            (png::ColorType::GrayscaleAlpha, png::BitDepth::Four) => {
+                return Err(unsupported_color(ExtendedColorType::La4))
+            }
+            (png::ColorType::Rgb, png::BitDepth::Four) => {
+                return Err(unsupported_color(ExtendedColorType::Rgb4))
+            }
+            (png::ColorType::Rgba, png::BitDepth::Four) => {
+                return Err(unsupported_color(ExtendedColorType::Rgba4))
+            }
+
+            (png::ColorType::Indexed, bits) => {
+                return Err(unsupported_color(ExtendedColorType::Unknown(bits as u8)))
+            }
+        };
+
+        Ok(PngDecoder { color_type, reader })
+    }
+
+    /// Turn this into an iterator over the animation frames.
+    ///
+    /// Reading the complete animation requires more memory than reading the data from the IDAT
+    /// frame–multiple frame buffers need to be reserved at the same time. We further do not
+    /// support compositing 16-bit colors. In any case this would be lossy as the interface of
+    /// animation decoders does not support 16-bit colors.
+    ///
+    /// If something is not supported or a limit is violated then the decoding step that requires
+    /// them will fail and an error will be returned instead of the frame. No further frames will
+    /// be returned.
+    pub fn apng(self) -> ApngDecoder<R> {
+        ApngDecoder::new(self)
+    }
+
+    /// Returns if the image contains an animation.
+    ///
+    /// Note that the file itself decides if the default image is considered to be part of the
+    /// animation. When it is not the common interpretation is to use it as a thumbnail.
+    ///
+    /// If a non-animated image is converted into an `ApngDecoder` then its iterator is empty.
+    pub fn is_apng(&self) -> bool {
+        self.reader.info().animation_control.is_some()
+    }
+}
+
+
 fn unsupported_color(ect: ExtendedColorType) -> ImageError {
     ImageError::Unsupported(UnsupportedError::from_format_and_kind(
         ImageFormat::Png.into(),
@@ -216,7 +314,7 @@ fn unsupported_color(ect: ExtendedColorType) -> ImageError {
 }
 
 impl<'a, R: 'a + Read> ImageDecoder<'a> for PngDecoder<R> {
-    type Reader = PngReader<R>;
+    type Reader = PngReader;
 
     fn dimensions(&self) -> (u32, u32) {
         self.reader.info().size()
